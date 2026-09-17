@@ -1,0 +1,43 @@
+name = "HakataiCyclostratigraphy"
+authors = ["Ilja J. Kocken <ikocken@hawaii.edu>"]
+version = "1.0.0"
+
+# Self-contained environment for the Hakatai (ZB23.N64) cyclostratigraphy
+# analysis. Deliberately does NOT depend on any unpublished/private package.
+# RCall is intentionally absent: the optional astrochron cross-check has its
+# own environment in `crosscheck/`. See README.md.
+
+[deps]
+AlgebraOfGraphics = "cbdf2221-f076-402e-a563-3d30da359d67"
+Arrow = "69666777-d1a9-59fb-9406-91d4454c9d45"
+Bootstrap = "e28b5b4c-05e8-5b66-bc03-6f0c0a0a06e0"
+CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+DSP = "717857b8-e6f2-59f4-9121-6e50c889abd2"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
+Downloads = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
+MCMCChains = "c7f686f2-ff18-58e9-bc7b-31028e88f75d"
+Peaks = "18e31ff7-3703-566c-8e60-38913d67486b"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
+ZipFile = "a5390f91-8eb1-5f08-bee0-b1d1ffed6cea"
+
+# Exact pins (=x.y.z) of the versions the published results were produced
+# with; they match Manifest.toml. Do not Pkg.update() if you want to reproduce.
+[compat]
+AlgebraOfGraphics = "=0.10.9"
+Arrow = "=2.8.1"
+Bootstrap = "=2.4.0"
+CairoMakie = "=0.13.10"
+CSV = "=0.10.16"
+DataFrames = "=1.8.1"
+Distributions = "=0.25.123"
+DSP = "=0.8.4"
+MCMCChains = "=6.0.7"
+Peaks = "=0.5.3"
+StatsBase = "=0.34.10"
+ZipFile = "=0.10.1"
+julia = "1.12"

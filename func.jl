@@ -1,3 +1,110 @@
+# Pure-Julia core routines for the Hakatai cyclostratigraphy analysis.
+#
+# This file has NO dependency on R / RCall: it can be `include`d with only the
+# packages in the top-level Project.toml. The astrochron-based cross-check
+# wrappers live in `func_R.jl`, which is optional (see README.md).
+#
+# Expects the following to be in scope (see run_analysis.jl):
+#   Downloads, ZipFile, CSV, Arrow, DataFrames, DSP, Peaks, StatsBase, Bootstrap, SHA
+
+"""
+    data_checksum(dat)
+
+sha256 over the raw bytes of the five data columns of a ZB23 window
+(time, ecc, inc, epl, cp), so a re-download can be compared with the data the
+published results used independently of the container format.
+"""
+function data_checksum(dat::DataFrame)
+    ctx = SHA256_CTX()
+    for c in (:time, :ecc, :inc, :epl, :cp)
+        update!(ctx, reinterpret(UInt8, Vector{Float64}(dat[!, c])))
+    end
+    bytes2hex(digest!(ctx))
+end
+
+"""
+    verify_checksum(dat, key; list = "CHECKSUMS.txt")
+
+Compare `data_checksum(dat)` with the entry for `key` (the cache file name) in
+CHECKSUMS.txt next to func.jl. Warns, never throws: the ZB23 server may
+legitimately update its files, but then the numbers here may not reproduce.
+"""
+function verify_checksum(dat::DataFrame, key::AbstractString;
+                         list = joinpath(@__DIR__, "CHECKSUMS.txt"))
+    isfile(list) || return nothing
+    expected = Dict(String(strip(p[2])) => String(p[1])
+                    for p in (split(l, r"\s+", limit = 2) for l in eachline(list) if !startswith(l, "#"))
+                    if length(p) == 2)
+    if !haskey(expected, key)
+        @warn "no checksum listed for $key in CHECKSUMS.txt"
+    elseif (actual = data_checksum(dat)) != expected[key]
+        @warn "checksum mismatch for $key: the downloaded data differ from the data the published results used" expected = expected[key] actual
+    else
+        @info "checksum ok"
+    end
+    return nothing
+end
+
+"""
+    get_ZB23_full(N)
+
+Download (or load from `out/` cache) the complete 3.5 Gyr ZB23.R`N` solution.
+Large: ~8.75 million rows per solution. `get_ZB23(N, tmin, tmax)` below reads
+only a time window and is what the analysis uses.
+"""
+function get_ZB23_full(N::Integer = 1)
+    if N > 64 || N < 1
+        throw(ArgumentError("N should be between 1 and 64, got $N"))
+    end
+
+    base_url = "https://www.soest.hawaii.edu/oceanography/faculty/zeebe_files/Astro/"
+
+    number = lpad(N, 2,'0')
+    astronomical_solution = "ZB23.R$(number)"
+    @info astronomical_solution
+
+    mkpath("out")
+    outfile = "out/$(astronomical_solution).arrow"
+    if isfile(outfile)
+        @info "loading file from cache"
+        return Arrow.Table(outfile) |> DataFrame
+    end
+
+    url = "$(base_url)3.5Gyr/ZB23-N64-eiop/$(astronomical_solution).eiop.dat.zip"
+
+    dwn = Downloads.download(url)
+    @info "downloaded"
+    unz = ZipFile.Reader(dwn)
+    @info "unzipped"
+
+    cols = [
+        "time", # time in kyr, negative
+        "ecc", # eccentricity
+        "inc", # inclination
+        "epl", # obliquity
+        "cp" # climatic precession e*sin(omegabar)
+    ]
+    dat = CSV.File(unz.files[1];
+                   header = cols,
+                   comment = "%",
+                   ignorerepeated = true,
+                   delim = " ",
+                   stripwhitespace = true) |>
+                       DataFrame
+    @info "read"
+
+    dat.sol .= astronomical_solution
+    @info "added name"
+
+    Arrow.write(outfile, dat)
+    @info "saved Arrow"
+
+    rm(dwn)
+    @info "removed dowloaded file"
+
+    return dat
+end
+
 function get_ZB23(N::Integer = 1,
                   tmin = -3.5e6,
                   tmax = 0)
@@ -6,17 +113,18 @@ function get_ZB23(N::Integer = 1,
     tres = -0.4
 
     if N > 64 || N < 1
-        @error "N should be between 1 and 64."
+        throw(ArgumentError("N should be between 1 and 64, got $N"))
     end
     skp = convert(Int, floor(tmax / tres))
     ftskp = convert(Int, floor(tend / tres - tmin / tres))
 
-    base_url = "http://www.soest.hawaii.edu/oceanography/faculty/zeebe_files/Astro/"
+    base_url = "https://www.soest.hawaii.edu/oceanography/faculty/zeebe_files/Astro/"
 
     number = lpad(N, 2,'0')
     astronomical_solution = "ZB23.R$(number)"
     @info astronomical_solution
 
+    mkpath("out")
     outfile = "out/$(astronomical_solution)_$(tmin)-$(tmax).arrow"
     if isfile(outfile)
         @info "loading file from cache"
@@ -46,7 +154,7 @@ function get_ZB23(N::Integer = 1,
 
     url = "$(base_url)3.5Gyr/ZB23-N64-eiop/$(astronomical_solution).eiop.dat.zip"
 
-    dwn = download(url)
+    dwn = Downloads.download(url)
     @info "downloaded"
     unz = ZipFile.Reader(dwn)
     @info "unzipped"
@@ -77,45 +185,50 @@ function get_ZB23(N::Integer = 1,
     dat.sol .= astronomical_solution
     @info "added name"
 
+    verify_checksum(dat, basename(outfile))
+
     Arrow.write(outfile, dat)
     @info "saved Arrow"
 
     return dat
 end
 
-Milankovitch_targets = Dict(
-    "p1" => (0.0653, 0.07),
-    "p2" => (0.075, 0.0785),
-    "p" => (0.065, 0.0785),
-    "o1" => (0.0415, 0.044),
-    "o2" => (0.0472, 0.0505),
-    "o12" => (0.042, 0.0505),
-    "o3" => (0.057, 0.0594),
-    "e" => (1/155, 1/75),
-    "E" => (1/440, 1/370)
+# Filter passbands (flow, fhigh) in 1/kyr for each Milankovitch target. This is
+# the single definition used by ecc_wrapper_julia below.
+const Milankovitch_targets = Dict(
+    :p1 => (0.0653, 0.07),
+    :p2 => (0.075, 0.0785),
+    :p => (0.065, 0.0785),
+    :o1 => (0.0415, 0.044),
+    :o2 => (0.0472, 0.0505),
+    :o12 => (0.042, 0.0505),
+    :o3 => (0.057, 0.0594),
+    :e => (1/155, 1/75),
+    :E => (1/440, 1/370)
 )
 
 
-# generated by DeepSeek to replace astrochron::bandpass
-# then improved by myself
-# it pads with 0
+"""
+    bandpass(data, dt, flow, fhigh; filter_order = 4, pad_fac = 2)
+
+Zero-phase Butterworth bandpass of a regularly sampled series, written to
+mimic `astrochron::bandpass`.
+
+- `data`: the input series (Vector{Float64}).
+- `dt`: sampling interval, in kyr.
+- `flow`, `fhigh`: passband edges, in 1/kyr.
+- `filter_order`: Butterworth order (default 4).
+- `pad_fac`: the series is zero-padded on both sides by `pad_fac * length(data)`
+  samples before `filtfilt`, and the padding is removed afterwards (default 2,
+  i.e. the padded series is five times the input length).
+
+Because of the padding and because the ETP is z-scored over the analysis
+window, the filtered values near the window ends depend on the window; see
+README "Notes for re-running".
+
+(Initial version generated by DeepSeek, then revised.)
+"""
 function bandpass(data::Vector{Float64}, dt::Float64, flow::Float64, fhigh::Float64; filter_order::Int=4, pad_fac::Int=2)
-    """
-    Apply a bandpass filter to a time series.
-
-    Parameters:
-    - data: The input time series (Vector{Float64}).
-    - dt: Sampling interval (in kyr).
-    - flow: Lower cutoff frequency (in 1/kyr).
-    - fhigh: Upper cutoff frequency (in 1/kyr).
-    - filter_order: Order of the filter (default is 4).
-    - pad_fac: Number of points to pad at the start and end (default is 2).
-
-    Returns:
-    - filtered_data: The bandpass-filtered time series.
-    """
-    # - pad_length: Number of points to pad at the start and end (default is 100).
-
     # Calculate sampling frequency
     fs = 1.0 / dt  # Sampling frequency in 1/kyr
 
@@ -125,11 +238,11 @@ function bandpass(data::Vector{Float64}, dt::Float64, flow::Float64, fhigh::Floa
     f_norm_high = fhigh / nyquist
 
     # Design a Butterworth bandpass filter
-    bandpass_filter = Butterworth(filter_order)
-    bandpass = Bandpass(f_norm_low, f_norm_high)
+    design = Butterworth(filter_order)
+    response = Bandpass(f_norm_low, f_norm_high)
 
     # Create the digital filter
-    filt = digitalfilter(bandpass, bandpass_filter)
+    filt = digitalfilter(response, design)
 
     # Pad the signal
     pad_length = length(data) * pad_fac
@@ -183,17 +296,17 @@ moving_block_bootstrap = function(x, fun = mean; b = 69, N = 999)
     # I did N = 10_000 first but the paper mentions 999, say
 
     n = length(x)
-    rolling_blocks = n - b + 1 # not +1 b/c julia is 1-indexed
+    rolling_blocks = n - b + 1 # number of possible block start positions
 
     nblocks = convert(Int, floor(n/b))
     @show nblocks # should be about 5
     # pick nblocks at random
     ss = rand(1:rolling_blocks, nblocks)
-    # draw n/b of the blocks, with replacement
-    idx = [ s .+ collect(1:b) for s in ss ] |> Iterators.flatten |> collect
+    # draw n/b of the blocks, with replacement; block starting at s covers s:s+b-1
+    idx = [ s .+ (0:b-1) for s in ss ] |> Iterators.flatten |> collect
     # Then aligning these n/b blocks in the order they were picked, will give the bootstrap observations.
     boot_obs = x[idx]
-    boot = bootstrap(mean, boot_obs, BasicSampling(N))
+    boot = bootstrap(fun, boot_obs, BasicSampling(N))
     # megaboot = zeros(N * nblocks)
     # cache = zeros(N)
     # for i in 1:rolling_blocks
@@ -208,194 +321,19 @@ moving_block_bootstrap = function(x, fun = mean; b = 69, N = 999)
     return boot.t1 |> Iterators.flatten |> collect
 end
 
-"gets the ZB23.RXX solution between tmin and tmax, extracts parameter, finds peaks, calculates differences"
-my_very_simple_wrapper = function(solution = 1, tmin = -1205e3, tmax = -1200e3;
-                                  b = 75, N = 999, parameter = "cp")
-    x = get_ZB23(solution, tmin, tmax)
-    pks = rcopy(R"""
-cp_peaks = $(x) |>
-  dplyr::select(all_of(c("time", $(parameter)))) |>
-  astrochron::peak(plateau = FALSE, genplot = FALSE) |>
-  dplyr::mutate(diff = Location - lead(Location)) |>
-  tidyr::drop_na()
-""")
-    @info "identied peaks"
 
-    return pks.diff
-end
-
-"rolling block bootstrap"
-my_simple_wrapper = function(solution = 1, tmin = -1205e3, tmax = -1200e3;
-                             b = 75, N = 999, parameter = "cp")
-    x = get_ZB23(solution, tmin, tmax)
-    pks = rcopy(R"""
-cp_peaks = $(x) |>
-  dplyr::select(all_of(c("time", $(parameter)))) |>
-  astrochron::peak(plateau = FALSE, genplot = FALSE) |>
-  dplyr::mutate(diff = Location - lead(Location)) |>
-  tidyr::drop_na()
-""")
-    @info "identied peaks"
-    megaboot = moving_block_bootstrap( pks.diff, mean; b = b, N = N )
-    @info "booted"
-
-    return megaboot
-end
-
-my_wrapper = function(solution = 1, fun = mean, tmin = -1205e3, tmax = -1200e3;
-                      b = 75, N = 999, parameter = "cp")
-    x = get_ZB23(solution, tmin, tmax)
-    pks = rcopy(R"""
-cp_peaks = $(x) |>
-  dplyr::select(all_of(c("time", $(parameter)))) |>
-  astrochron::peak(plateau = FALSE, genplot = FALSE) |>
-  dplyr::mutate(diff = Location - lead(Location)) |>
-  tidyr::drop_na()
-""")
-    @info "identied peaks"
-    bt = my_boot(pks.diff, fun; b = b, N = N)
-    @info "booted"
-    return bt
-end
-
-wrapper = function(solution = 1, fun = mean, tmin = -1205e3, tmax = -1200e3)
-    x = get_ZB23(solution, tmin, tmax)
-
-    # create ETP with weights
-    # 1.5, 1.2, 1.2 from Figure S12 caption
-    etp_weights = [1.5, 1.2, 1.2]
-    # uses StatsBase.zscore
-    necc .= zscore(x.ecc)
-    nobl .= zscore(x.epl)
-    nprec .= zscore(x.cp)
-    @. x.etp .= etp_weights[1] * necc + etp_weights[2] * nobl + etp_weights[3] * nprec
-    @info "calculated ETP with weights $etp_weights"
-
-    filter_freqs = DataFrame(
-    target = ["p1", "p2",  "p", "o1", "o2", "o12", "o3", "e", "E"],
-        flow =  [0.0653, 0.075, 0.065, 0.0415, 0.0472, 0.042, 0.057, 1/155, 1/440],
-        fhigh = [0.07, 0.0785, 0.0785, 0.044, 0.0505, 0.0505, 0.06, #0.0594, # OR 0.06 for some!
-                 1/75, 1/370
-                 ]
-    )
-
-    window_size = 1e3
-    cut_groups = tmin:window_size:tmax |> collect
-    cut_groups[end] = cut_groups[end] + 1
-
-R"""
-my_peak <- function(data) {
-    data |>
-        dplyr::select(all_of(c("time", "filter"))) |>
-        astrochron::peak(plateau = FALSE, genplot = FALSE, verbose = FALSE) |>
-        dplyr::rename(peak_age = Location, peak_value = Peak_Value) |>
-        dplyr::mutate(diff = peak_age - dplyr::lag(peak_age)) |>
-        tidyr::drop_na()
-}
 """
+    ecc_wrapper_julia(solution, fun = mean, tmin, tmax; all_peaks = false)
 
-    pks = rcopy(R"""
-cp_flt = $(x) |>
-  # this is from my R package CretaceousConstraints
-  bandpass_filter(frequencies = $(filter_freqs), x = time, y = etp) |>
-  # taner_filter(frequencies = $(filter_freqs), x = time, y = etp, roll = 1e3, verbose = FALSE, genplot = FALSE) |>
-  tidyr::nest(.by = "target") |>
-  dplyr::mutate(pk = purrr::map(data, my_peak)) |>
-  dplyr::select(-"data") |>
-  tidyr::unnest(cols = "pk") |>
-  mutate(grp = cut(peak_age, $(cut_groups)))
-""")
-    @info "filtered frequencies"
-    @info "identied peaks"
-
-    means = rcopy(R"""
-cp_flt |>
-   summarize(.by = c(grp, target),
-             mean_age = mean(peak_age),
-             mean_diff_1Myr = mean(diff),
-             n = n()) |>
-   mutate(solution = $(x.sol[1]))
-""")
-    # TODO: do something else so it become
-    # for (i, gr), (j, target) in enumerate(pks.grp), enumerate(pks.target)
-    #     means = bootstrap(mean, pks.diff, MaximumEntropySampling(999))
-    # end
-
-    @info "calculated means"
-    return means
-end
-
-ecc_wrapper = function(solution = 1, fun = mean, tmin = -1250e3, tmax = -1200e3)
-    x = get_ZB23(solution, tmin, tmax)
-
-    # create ETP with weights
-    # 1.5, 1.2, 1.2 from Figure S12 caption
-    etp_weights = [1.5, 1.2, 1.2]
-    # uses StatsBase.zscore
-    necc = zscore(x.ecc)
-    nobl = zscore(x.epl)
-    nprec = zscore(x.cp)
-    @. x.etp .= etp_weights[1] * necc + etp_weights[2] * nobl + etp_weights[3] * nprec
-    @info "calculated ETP with weights $etp_weights"
-
-    filter_freqs = DataFrame(
-    target = ["p1", "p2",  "p", "o1", "o2", "o12", "o3", "e", "E"],
-        flow =  [0.0653, 0.075, 0.065, 0.0415, 0.0472, 0.042, 0.057, 1/155, 1/440],
-        fhigh = [0.07, 0.0785, 0.0785, 0.044, 0.0505, 0.0505, 0.06, #0.0594, # OR 0.06 for some!
-                 1/75, 1/370]
-    )
-
-    window_size = 1e3
-    cut_groups = tmin:window_size:tmax |> collect
-    cut_groups[end] = cut_groups[end] + 1
-
-R"""
-my_peak <- function(data) {
-    data |>
-        dplyr::select(all_of(c("time", "filter"))) |>
-        astrochron::peak(plateau = FALSE, genplot = FALSE, verbose = FALSE) |>
-        dplyr::rename(peak_age = Location, peak_value = Peak_Value) |>
-        dplyr::mutate(diff = peak_age - dplyr::lag(peak_age)) |>
-        tidyr::drop_na()
-}
+The published pipeline for one ZB23 solution: load the window, build the
+weighted ETP, bandpass at every `Milankovitch_targets` band, detect peaks,
+and return per-1 Myr-block `fun` of the peak-to-peak durations (or, with
+`all_peaks = true`, every individual duration).
 """
-
-    pks = rcopy(R"""
-cp_flt = $(x) |>
-  # this is from my R package CretaceousConstraints
-  bandpass_filter(frequencies = $(filter_freqs), x = time, y = etp) |>
-  # taner_filter(frequencies = $(filter_freqs), x = time, y = etp, roll = 1e3, verbose = FALSE, genplot = FALSE) |>
-  tidyr::nest(.by = "target") |>
-  dplyr::mutate(pk = purrr::map(data, my_peak)) |>
-  dplyr::select(-"data") |>
-  tidyr::unnest(cols = "pk") |>
-  mutate(grp = cut(peak_age, $(cut_groups)))
-""")
-    @info "filtered frequencies"
-    @info "identied peaks"
-
-    means = rcopy(R"""
-cp_flt |>
-   summarize(.by = c(grp, target),
-             mean_age = mean(peak_age),
-             mean_diff_1Myr = mean(diff),
-             n = n()) |>
-   mutate(solution = $(x.sol[1]))
-""")
-    # TODO: do something else so it become
-    # for (i, gr), (j, target) in enumerate(pks.grp), enumerate(pks.target)
-    #     means = bootstrap(mean, pks.diff, MaximumEntropySampling(999))
-    # end
-
-    @info "calculated means"
-    return means
-end
-
-
 ecc_wrapper_julia = function(solution = 1,
                              fun = mean,
-                             tmin = -1250e3, tmax = -1200e3
-                             # tmin = -1205e3, tmax = -1200e3
+                             tmin = -1250e3, tmax = -1200e3;
+                             all_peaks = false
                              )
     x = get_ZB23(solution, tmin, tmax)
 
@@ -411,17 +349,7 @@ ecc_wrapper_julia = function(solution = 1,
         etp_weights[3] * nprec
     @info "calculated ETP with weights $etp_weights"
 
-    Milankovitch_targets = Dict(
-        :p1 => (0.0653, 0.07),
-        :p2 => (0.075, 0.0785),
-        :p => (0.065, 0.0785),
-        :o1 => (0.0415, 0.044),
-        :o2 => (0.0472, 0.0505),
-        :o12 => (0.042, 0.0505),
-        :o3 => (0.057, 0.0594),
-        :e => (1/155, 1/75),
-        :E => (1/440, 1/370)
-    )
+    # passbands: the top-level Milankovitch_targets Dict
 
     # # using_a_dict = function()
     # filtered_targets = Dict{Symbol, Vector{Float64}}()
@@ -443,8 +371,9 @@ ecc_wrapper_julia = function(solution = 1,
     @info "filtered"
 
     # work on grouped df
-    peaks = combine(groupby(df, :variable),
-                    :value => (z -> x.time[findmaxima(z).indices]) => :time)
+    peaks = combine(groupby(df, :variable; sort = false),
+                    :value => (z -> (pk = findmaxima(z);
+                                     (amp = pk.heights, time = x.time[pk.indices]))) => AsTable)
     # append to df => just work with dicts for now
     # for (name, component) in filtered_targets
     #     x[!, Symbol(name)] = component
@@ -460,23 +389,69 @@ ecc_wrapper_julia = function(solution = 1,
     #     fp = findmaxima(c)
     #     peaks[Milankovitch_targets.keys[i]]= x.time[fp.indices]
     # end
-
     @info "detected peaks"
 
-    peaks = combine(groupby(peaks, :variable),
-                    :time => (z -> z[1:end-1]) => :time, # identity but 1 fewer
-                    :time => (z -> z[1:end-1] .- z[2:end]) => :duration,
-                    :time => length => :npeaks)
+    diffs = combine(groupby(peaks, :variable; sort = false),
+                    :time => (z -> z[1:end-1] .+ (z[2:end] .- z[1:end-1]) ./ 2) => :time, # mean age of duration interval
+                    :amp => (z -> z[1:end-1] .+ (z[2:end] .- z[1:end-1]) ./ 2) => :amp, # mean amplitude of the two bounding peaks
+                    :time => (z -> z[1:end-1] .- z[2:end]) => :duration)
 
     @info "calculated durations"
 
+    # # inspection plot
+    # plt_raw = AlgebraOfGraphics.data(x) *
+    #     mapping(:time, :etp) *
+    #     visual(Lines, label = "data")
+
+    # plt_flt = AlgebraOfGraphics.data(df) *
+    #     mapping(direct(repeat(x.time, outer = Milankovitch_targets.count)), :value, row = :variable) *
+    #     visual(Lines, color = :cyan, label = "filter")
+
+    # plt_pks = AlgebraOfGraphics.data(peaks) *
+    #     mapping(:time, :amp, row = :variable) *
+    #     visual(Scatter, color = :red, label = "peaks")
+
+    # plt_dff = AlgebraOfGraphics.data(diffs) *
+    #     mapping(:time, :amp, :duration => (x -> x / 2), row = :variable) *
+    #     visual(Errorbars, color = :orange, label = "duration", direction = :x, whiskerwidth = 15)
+
+    # f = (plt_raw + plt_flt + plt_pks + plt_dff) |> draw
+    # save("imgs/illustrate_algorithm.png", f)
+
+    # plt_dur = AlgebraOfGraphics.data(diffs) *
+    #     mapping(:time => (x -> x / 1000) => "Time (Myr)", :duration => "Peak duration (kyr)", row = :variable) * visual(Lines)
+
+    # f = draw(plt_dur, facet = (;linkyaxes = :none))
+    # save("imgs/discrete_diffs.png", f)
+    # temporary return all peaks function
+    # peaks.solution .= x.sol[1]
+    # return peaks
+
+    # something is up with this! seems like there are only very few
+    # unique durations, maybe because of the Nyquist frequency?
+    # durs = combine(groupby(diffs, :variable), :duration => unique => :udur)
+    # sort!(combine(groupby(durs, :variable), nrow), :variable)
+
+
+    # opt-in: return every individual peak-to-peak duration, rather than the
+    # 1 Myr block means. Reproduces out/ZB23.N64_filtered_all_duration_*.csv
+    if all_peaks
+        diffs.solution .= x.sol[1]
+        sort!(diffs, :variable)
+        return diffs
+    end
+
     block_size = 1000 # kyr = 1 Myr
 
-    peaks.grp = floor.(Int, peaks.time / block_size)
+    diffs.grp = floor.(Int, diffs.time / block_size)
 
-    summ = combine(groupby(peaks, [:variable, :grp]),
-                   :duration => mean => :avg_duration,
-                   :npeaks => sum => :sum_peaks)
+    summ = combine(groupby(diffs, [:variable, :grp]; sort = false),
+                   :time => fun => :avg_time,
+                   :amp => fun => :avg_amp,
+                   :duration => fun => :avg_duration,
+                   # number of peak-to-peak durations this block mean is
+                   # taken over
+                   nrow => :n_durations)
 
     sort!(summ, :variable)
 

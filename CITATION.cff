@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the archived deposit below."
+title: "Hakatai cyclostratigraphy: ZB23.N64 cycle-duration analysis"
+abstract: >-
+  Julia code that downloads the ZB23.N64 astronomical solutions, builds a
+  weighted ETP signal, bandpass-filters it at the Milankovitch target
+  frequencies, detects peaks, and reports mean cycle durations per 1 Myr
+  block with 95% intervals. Accompanies the Middle Hakatai Shale
+  cyclostratigraphy manuscript.
+type: software
+version: 1.0.0
+date-released: "2026-09-17"
+authors:
+  - family-names: Kocken
+    given-names: "Ilja J."
+    orcid: "https://orcid.org/0000-0003-2196-8718"
+    email: ikocken@hawaii.edu
+license: GPL-3.0-or-later
+repository-code: "https://github.com/japhir/hakatai-cyclostratigraphy"
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.21038841
+    description: Archived data and code deposit for the paper

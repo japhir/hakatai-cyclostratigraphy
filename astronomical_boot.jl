@@ -1,12 +1,27 @@
-using Revise
+# EXPLORATORY RECORD. This is the original working script. The portability
+# edits are marked "reproducibility fix" below; the density comparison of the
+# all-peak durations (around `mall` / `meall`) was added after the original
+# analysis. It is meant to be stepped through interactively, not run
+# top-to-bottom: several blocks are mutually exclusive experiments and some
+# reference variables whose defining block was later commented out or lost
+# (`ml`, `cpks`, `bsi`, `md`, `ci`, `hpdi`, `sm`, `sstd`, `sci`, `megaboot`).
+# The reproducible pipeline is run_analysis.jl.
+#
+# It uses RCall, so it needs the crosscheck/ environment (see README.md).
+
 using Pkg
-Pkg.activate("../../prj/2023-06-03_bayesian_snvec/")
+# reproducibility fix: was Pkg.activate("../../prj/2023-06-03_bayesian_snvec/"),
+# which borrowed the environment of the unpublished SNVec.jl repo. Nothing here
+# ever used SNVec itself -- only the packages that environment happened to list.
+Pkg.activate(joinpath(@__DIR__, "crosscheck"))
 
 # reading/writing data files
+using Downloads
 using ZipFile
 using DataFrames
 using CSV
 using Arrow
+using SHA # checksums of the ZB23 downloads
 
 import MCMCChains: hpd, Chains
 using StatsBase
@@ -15,18 +30,43 @@ import Bootstrap: bootstrap
 using DSP # for bandpass filtering
 using Peaks # to identify peaks
 
-using GLMakie
+# reproducibility fix: was GLMakie, which needs a GPU and a display. CairoMakie
+# renders the same figures headlessly. For interactive use (DataInspector etc.)
+# run Pkg.add("GLMakie") and swap this back.
+using CairoMakie
+const GLMakie = CairoMakie  # the qualified GLMakie.density(...) calls below
 using AlgebraOfGraphics
 
 using RCall # for astrochron code
 #R"library(astrochron)"
 R"library(tidyverse)"
-R"devtools::load_all('~/SurfDrive/Postdoc1/prj/2023-05-19_cretaceous_constraints/')"
+# reproducibility fix: was devtools::load_all() on a local path that no longer
+# exists. The package is public; install it once with
+#   remotes::install_github("japhir/CretaceousConstraints")
+R"library(CretaceousConstraints)"
 
-includet("func.jl")
+# reproducibility fix: func.jl was split so the pure-Julia core loads without
+# RCall. func_R.jl holds the astrochron wrappers used further down. (Was
+# Revise.includet; Revise is not part of the crosscheck environment, add it
+# to your global environment if you want live reloading.)
+include("func.jl")
+include("func_R.jl")
 
-# read full file
-# dat = get_ZB23(1)
+# read full 3.5 Gyr files (~8.75 million rows each, hundreds of MB of download).
+# Not needed for the analysis; only used for the obliquity overview plot below.
+# dat1 = get_ZB23_full(1)
+# dat2 = get_ZB23_full(2)
+# dat3 = get_ZB23_full(3)
+
+# d = vcat(dat1, dat2)
+
+# using AlgebraOfGraphics
+# pl = data(d) *
+#     mapping(:time => (x -> x * 1e-3) => "Time (Myr)",
+#             :epl => (x -> x * 180/pi) => "Obliquity (°)",
+#             color = :sol => "") *
+#                 visual(Lines, alpha = 0.6)
+# draw(pl)
 
 # limit to certain age range (in kyr)
 #dat2 = get_ZB23(1, -337e3, -300e3)
@@ -44,6 +84,12 @@ includet("func.jl")
 # 61 is missing!!!
 # allsols = vcat(get_ZB23.(1:60, -337e3, -300e3))
 # allsols = vcat(get_ZB23.(62:64, -337e3, -300e3))
+# allsols = vcat(get_ZB23.(1:60, -337e3, -300e3))
+
+# for Dan Lunt: every full 3.5 Gyr solution stacked (63 downloads, several GB)
+# fullsols = reduce(vcat, get_ZB23_full.([1:60; 62:64]))
+
+
 
 # read from Arrow cache
 # nums = vcat(collect(1:60), collect(62:64))
@@ -205,8 +251,6 @@ f, ax = rw + flt + julflt  |> draw
 # add peaks
 scatter!(f.content[8], pks.Location, pks.Peak_Value, label = "R", color = :cyan)
 scatter!(f.content[8], jl_peaks.time, jl_peaks.peak, label = "Julia")
-
-find
 
 
 fig, ax, ln = lines(ml.time, ml.cp, label = ml.sol)
@@ -489,7 +533,7 @@ bt.mean = zeros(nrow(bt))
 bt.lwr = zeros(nrow(bt))
 bt.upr = zeros(nrow(bt))
 # bt[!, :smp] .= repeat([zeros(10_000)], nrow(bt))
-for i in 1:nrow(boot)
+for i in 1:nrow(bt)
     ci = confint(bt.boot[i], BasicConfInt(0.95))[1]
     bt.mean[i] = ci[1]
     bt.lwr[i] = ci[2]
@@ -613,11 +657,25 @@ mes = vcat(
 
 # save results
 # ms = mes
-# CSV.write("out/ZB23.N64_filtered_durations_-1205_-1200.csv", ms)
-# CSV.write("out/ZB23.N64_filtered_durations_-1250_-1200.csv", mes)
+# CSV.write("out/ZB23.N64_filtered_durations_-1205_-1200_.csv", ms)
+# the one with _ has been revised to also calculate avg time and avg amplitude
+# CSV.write("out/ZB23.N64_filtered_durations_-1250_-1200_.csv", mes)
+# mall = mes
+# CSV.write("out/ZB23.N64_filtered_all_duration_-1250_-1200.csv", mall)
+# CSV.write("out/ZB23.N64_filtered_all_duration_-1205_-1200.csv", meall)
 
-ms = CSV.read(DataFrame, "out/ZB23.N64_filtered_durations_-1205_-1200.csv")
-mes = CSV.read(DataFrame, "out/ZB23.N64_filtered_durations_-1250_-1200.csv")
+# ms = CSV.read("out/ZB23.N64_filtered_durations_-1205_-1200.csv", DataFrame)
+# mes = CSV.read("out/ZB23.N64_filtered_durations_-1250_-1200.csv", DataFrame)
+# fixed number of groups by calculating avg time of duration correctly
+ms = CSV.read("out/ZB23.N64_filtered_durations_-1205_-1200_.csv", DataFrame)
+mes = CSV.read("out/ZB23.N64_filtered_durations_-1250_-1200_.csv", DataFrame)
+
+# combine(groupby(combine(groupby(mes, :variable), :avg_duration => unique), :variable), :avg_duration_unique => length => :n_unique)
+
+# every individual peak-to-peak duration; written by
+#     julia --project=. run_analysis.jl --all-peaks
+mall = CSV.read("out/ZB23.N64_filtered_all_duration_-1250_-1200.csv", DataFrame)
+meall = CSV.read("out/ZB23.N64_filtered_all_duration_-1205_-1200.csv", DataFrame)
 
 avgs = rcopy(R"""
   $(ms) |>
@@ -626,7 +684,7 @@ avgs = rcopy(R"""
              upr = quantile(avg_duration, 1-0.05/2),
              lwr_ci = mean - lwr,
              upr_ci = upr - mean,
-             total_peaks = sum(sum_peaks),
+             total_durations = sum(n_durations),
              total_blocks = n())
 """)
 
@@ -638,11 +696,53 @@ avgs_big = rcopy(R"""
              upr = quantile(avg_duration, 1-0.05/2),
              lwr_ci = mean - lwr,
              upr_ci = upr - mean,
-             total_peaks = sum(sum_peaks),
+             total_durations = sum(n_durations),
              total_blocks = n())
 """)
 
+avgs_all_big = rcopy(R"""
+  $(mall) |>
+   summarize(.by = c(variable), mean = mean(duration),
+             lwr = quantile(duration, 0.05/2),
+             upr = quantile(duration, 1-0.05/2),
+             lwr_ci = mean - lwr,
+             upr_ci = upr - mean,
+             # total_durations = n(),
+             total_peaks = n()) |>
+   arrange(variable)
+""")
 
+avgs_all = rcopy(R"""
+  $(meall) |>
+   summarize(.by = c(variable), mean = mean(duration),
+             lwr = quantile(duration, 0.05/2),
+             upr = quantile(duration, 1-0.05/2),
+             lwr_ci = mean - lwr,
+             upr_ci = upr - mean,
+             # total_durations = n(),
+             total_peaks = n()) |>
+   arrange(variable)
+""")
+
+dt = AlgebraOfGraphics.data(mes)
+mp = mapping(:avg_time => (x -> x / 1e3) => "Time (Myr)",
+                        :avg_duration => "Peak duration (kyr)",
+                        color = :solution,
+                        row = :variable)
+
+plt_dur = dt * mp * # visual(Scatter) +
+    visual(Lines, alpha = 0.2, legend = (;alpha = 1)) +
+    dt *
+    mapping(:grp => (x -> (x .+ 0.5)) => "Time (Myr)",
+            :avg_duration => "Peak duration (kyr)",
+            group = :grp => nonnumeric,
+            row = :variable) *
+                visual(Violin)  +
+    mapping([-1200, -1205, -1250]) * visual(VLines)
+f = draw(plt_dur, scales(Color = (; palette = from_continuous(:viridis))),
+         facet = (;linkyaxes = :none))
+save("imgs/duration_vs_time.png", f)
+# the weird one with some peak durations up to 499.2 kyr is ZB23.R28
 
 sml_dens = AlgebraOfGraphics.data(ms) *
     mapping(:avg_duration,
@@ -674,20 +774,60 @@ big_dens =  AlgebraOfGraphics.data(mes) *
             row = :variable) *
     visual(VLines, linewidth = 3)
 
-# plt = big_dens
-plt = big_dens + sml_dens
+all_big_dens =  AlgebraOfGraphics.data(mall) *
+   mapping(:duration,
+            color = direct("−1200 to −1250 Myr all peaks"),
+            # color = :solution,
+            # color = :grp,
+            # stack = :solution,
+            row = :variable) *
+    visual(Density, bandwidth = 0.2) +
+    # and vlines for mean and 95% CI
+    AlgebraOfGraphics.data(avgs_all_big) *
+    mapping([:mean, :lwr, :upr],
+            color = direct("−1200 to −1250 Myr all peaks"),
+            row = :variable) *
+    visual(VLines, linewidth = 3)
 
-f, ax = draw(plt, scales(Color = (; palette = [(:purple, 0.4), (:cyan, 0.4)])),
+all_dens =  AlgebraOfGraphics.data(meall) *
+   mapping(:duration,
+            color = direct("−1200 to −1205 Myr all peaks"),
+            # color = :solution,
+            # color = :grp,
+            # stack = :solution,
+            row = :variable) *
+    visual(Density, bandwidth = 0.4) +
+    # and vlines for mean and 95% CI
+    AlgebraOfGraphics.data(avgs_all) *
+    mapping([:mean, :lwr, :upr],
+            color = direct("−1200 to −1205 Myr all peaks"),
+            row = :variable) *
+    visual(VLines, linewidth = 3)
+
+
+# plt = big_dens
+draw(all_big_dens + big_dens, facet = (;linkxaxes = :none, linkyaxes = :none))
+draw(all_dens + sml_dens, facet = (;linkxaxes = :none, linkyaxes = :none))
+
+
+plt = # all_big_dens + all_dens +
+    big_dens + sml_dens
+f, ax = draw(plt, scales(Color = (; palette = [(:purple, 0.4), (:orange, 0.4)#,
+                                               # (:cyan, 0.4), (:green, 0.4)
+                                               ])),
              facet=(; linkxaxes=:none,linkyaxes=:none),
              legend = (; position = :top))
 f.content[9].xlabel = "Cycle duration (kyr)"
 
-
-save("imgs/cycle_duration.png", f)
-save("imgs/cycle_duration_taner.png", f)
-save("imgs/cycle_duration_means.png", f)
-save("imgs/cycle_duration_means_ecc.png", f)
+# the same figure was saved under different names as the plot above was
+# varied (taner filter, eccentricity-only, all peaks, ...). Only
+# cycle_duration_means_both.png is regenerated by run_analysis.jl.
 save("imgs/cycle_duration_means_both.png", f)
+# save("imgs/cycle_duration.png", f)
+# save("imgs/cycle_duration_taner.png", f)
+# save("imgs/cycle_duration_means.png", f)
+# save("imgs/cycle_duration_means_ecc.png", f)
+# save("imgs/cycle_duration_means_all.png", f)
 
 # for (i, trg) in enumerate(targets)
 #     hist!(ax,
