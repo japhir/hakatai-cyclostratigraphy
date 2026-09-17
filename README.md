@@ -130,9 +130,10 @@ provides `bandpass_filter()` and `taner_filter()`.
   line, so each window starts at −1 199 999.2 kyr rather than −1 200 000.0
   (12 503 rows instead of 12 501 for the 5 Myr window). The published tables
   were computed this way. Reading the exact window instead moves about 5% of
-  the block means by one sample (0.4 kyr), which bounds the shift of any
-  summary mean to 0.02 kyr, so it was left as is and documented; to change it,
-  filter the loaded rows on `tmin <= time <= tmax` in `get_ZB23`.
+  the block means by one sample (0.4 kyr); over all 63 solutions this changes
+  the summary means by at most 0.002 kyr and the 95% bounds by at most
+  0.05 kyr, so it was left as is and documented. To change it, filter the
+  loaded rows on `tmin <= time <= tmax` in `get_ZB23`.
 - **Long-period targets depend on the window edges.** The ETP is z-scored over
   the window and the filter zero-pads it, so the filtered signal near the ends
   depends on the window. For E (405 kyr, only ~12 cycles in the 5 Myr window)
