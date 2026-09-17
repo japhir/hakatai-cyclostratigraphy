@@ -1,6 +1,6 @@
 # Hakatai cyclostratigraphy — ZB23.N64 cycle-duration analysis
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21038841.svg)](https://doi.org/10.5281/zenodo.21038841)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21038840.svg)](https://doi.org/10.5281/zenodo.21038840)
 
 Julia code accompanying the Middle Hakatai Shale cyclostratigraphy manuscript.
 
@@ -182,7 +182,7 @@ the source; the git history has the details.
 
 The archived release of this code, together with the rest of the data for the
 paper (including the inversion spreadsheet), is at
-<https://doi.org/10.5281/zenodo.21038841>. That DOI resolves to the latest
+<https://doi.org/10.5281/zenodo.21038840>. That DOI resolves to the latest
 version of the deposit. Please cite it alongside the paper when reusing this
 code; `CITATION.cff` has the metadata.
 
